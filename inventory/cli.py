@@ -65,6 +65,12 @@ def build_parser():
 
     p_show = sub.add_parser("show", help="查询商品信息与完整流水")
     p_show.add_argument("--sku", required=True, help="商品 SKU（区分大小写）")
+    p_show.add_argument(
+        "--type",
+        choices=("receive", "issue"),
+        default=None,
+        help="可选：只显示 receive（入库）或 issue（出库）流水",
+    )
     return parser
 
 
@@ -106,7 +112,7 @@ def run(argv):
             if product is None:
                 print(f"错误: 商品不存在: {sku}", file=sys.stderr)
                 return 2
-            product["movements"] = db.list_movements(sku)
+            product["movements"] = db.list_movements(sku, mtype=args.type)
             emit(product)
             return 0
 
