@@ -20,6 +20,9 @@ from .storage import (
 
 INTEGER_RE = re.compile(r"^\d+$")
 
+# SQLite INTEGER 主键的最大值（64 位有符号整数上界）。
+MAX_AFTER_ID = 9223372036854775807
+
 
 class ArgumentParser(argparse.ArgumentParser):
     """让参数错误以简洁中文提示输出到 stderr，退出码仍为 2。"""
@@ -36,6 +39,27 @@ def positive_int(value):
             f"数量必须是大于零的整数，收到: {value!r}"
         )
     return int(text)
+
+
+def after_id(value):
+    """--after-id：0 至 2^63-1 的十进制非负整数，允许前导零。
+
+    缺值、空字符串、负数、小数、非数字或超出范围时由 argparse 拒绝
+    （退出码 2，提示中包含参数名与原因）。
+    """
+    text = str(value)
+    if not text:
+        raise argparse.ArgumentTypeError("--after-id 不能为空")
+    if not INTEGER_RE.match(text):
+        raise argparse.ArgumentTypeError(
+            f"--after-id 必须是十进制非负整数，收到: {value!r}"
+        )
+    number = int(text)
+    if number > MAX_AFTER_ID:
+        raise argparse.ArgumentTypeError(
+            f"--after-id 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    return number
 
 
 def clean_text(value, field):
@@ -69,6 +93,16 @@ def build_parser():
         "--type",
         choices=("receive", "issue"),
         help="按流水类型筛选：receive（入库）或 issue（出库）；缺省返回全部流水",
+    )
+    p_show.add_argument(
+        "--after-id",
+        type=after_id,
+        default=None,
+        metavar="ID",
+        help=(
+            "只返回该 SKU 中编号严格大于 ID 的流水（0 表示从最早流水开始）；"
+            "接受 0 至 9223372036854775807 的十进制整数，允许前导零"
+        ),
     )
     return parser
 
@@ -111,7 +145,9 @@ def run(argv):
             if product is None:
                 print(f"错误: 商品不存在: {sku}", file=sys.stderr)
                 return 2
-            product["movements"] = db.list_movements(sku, args.type)
+            product["movements"] = db.list_movements(
+                sku, args.type, args.after_id
+            )
             emit(product)
             return 0
 
