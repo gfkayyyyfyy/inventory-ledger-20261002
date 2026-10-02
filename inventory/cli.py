@@ -15,7 +15,9 @@ from .storage import (
     DatabaseError,
     InsufficientStockError,
     InventoryDB,
+    MAX_QTY,
     ProductExistsError,
+    StockOverflowError,
 )
 
 INTEGER_RE = re.compile(r"^\d+$")
@@ -32,13 +34,26 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def positive_int(value):
-    """只接受由数字组成且大于零的整数，拒绝小数、负数、零和非数字。"""
+    """只接受 1 至 MAX_QTY 的十进制正整数，允许前导零（不改变数量含义）。
+
+    零、负数、小数、非数字按“数量无效”拒绝；超过 MAX_QTY 时提示中包含
+    --qty 与允许的上限。两类错误都由 argparse 以退出码 2 拒绝。
+    """
     text = str(value)
-    if not INTEGER_RE.match(text) or int(text) <= 0:
+    if not INTEGER_RE.match(text):
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
-    return int(text)
+    number = int(text)  # Python 任意精度整数，超大数字也能精确比较
+    if number <= 0:
+        raise argparse.ArgumentTypeError(
+            f"数量必须是大于零的整数，收到: {value!r}"
+        )
+    if number > MAX_QTY:
+        raise argparse.ArgumentTypeError(
+            f"--qty 不能超过单次数量上限 {MAX_QTY}，收到: {value!r}"
+        )
+    return number
 
 
 def after_id(value):
@@ -154,7 +169,7 @@ def run(argv):
         mtype = args.command  # receive 或 issue
         try:
             result = db.move(sku, mtype, args.qty)
-        except InsufficientStockError as exc:
+        except (InsufficientStockError, StockOverflowError) as exc:
             print(f"错误: {exc}", file=sys.stderr)
             return 2
         if result is None:

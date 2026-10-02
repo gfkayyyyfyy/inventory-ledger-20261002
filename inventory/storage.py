@@ -1,25 +1,32 @@
 """SQLite 持久化层：商品表与流水表。
 
 余额（products.quantity）与流水（movements）在同一个事务内更新，
-借助 UNIQUE 主键保证 SKU 不重复、CHECK 约束保证余额非负。
+借助 UNIQUE 主键保证 SKU 不重复、CHECK 约束保证余额在 0 至 2^63-1 之间。
+
+所有数量与余额均为 64 位有符号整数范围内的精确整数。SQLite 在整数运算
+超过 2^63-1 时会悄悄退化为 REAL（浮点）而丢精度，因此入库的余额上界在
+Python 层用精确整数预先判定，绝不把超界值交给 SQLite 计算。
 """
 
 import sqlite3
+
+# 单次出入库数量与库存余额共用的上界：64 位有符号整数最大值。
+MAX_QTY = 9223372036854775807
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
     sku      TEXT PRIMARY KEY,
     name     TEXT NOT NULL,
-    quantity INTEGER NOT NULL CHECK (quantity >= 0)
+    quantity INTEGER NOT NULL CHECK (quantity >= 0 AND quantity <= %d)
 );
 CREATE TABLE IF NOT EXISTS movements (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     sku      TEXT NOT NULL REFERENCES products(sku),
     type     TEXT NOT NULL CHECK (type IN ('receive', 'issue')),
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    balance  INTEGER NOT NULL CHECK (balance >= 0)
+    quantity INTEGER NOT NULL CHECK (quantity > 0 AND quantity <= %d),
+    balance  INTEGER NOT NULL CHECK (balance >= 0 AND balance <= %d)
 );
-"""
+""" % (MAX_QTY, MAX_QTY, MAX_QTY)
 
 
 class DatabaseError(Exception):
@@ -32,6 +39,10 @@ class ProductExistsError(Exception):
 
 class InsufficientStockError(Exception):
     """出库数量超过当前余额。"""
+
+
+class StockOverflowError(Exception):
+    """入库后余额超过库存上界 2^63-1。"""
 
 
 class InventoryDB:
@@ -79,14 +90,29 @@ class InventoryDB:
     def move(self, sku, mtype, qty):
         """入库/出库：更新余额并插入流水，二者在同一事务内同时生效。
 
-        商品不存在返回 None；出库超过余额抛 InsufficientStockError。
+        商品不存在返回 None；出库超过余额抛 InsufficientStockError；
+        入库后余额超过 MAX_QTY 抛 StockOverflowError。
+        所有拒绝都发生在写入之前，余额与流水均不改变。
         """
+        # 防御性校验：正常入口已由 CLI 的 positive_int 保证，此处确保
+        # 直接调用本层时也不会把超界整数交给 SQLite（绑定会抛 OverflowError，
+        # 而 SQL 运算超界会退化成 REAL 丢精度）。
+        if not isinstance(qty, int) or not 1 <= qty <= MAX_QTY:
+            raise ValueError(f"数量必须是 1 至 {MAX_QTY} 的整数，收到: {qty!r}")
         product = self.get_product(sku)
         if product is None:
             return None
-        if mtype == "issue" and qty > product["quantity"]:
+        current = product["quantity"]
+        if mtype == "receive":
+            # 用 Python 任意精度整数预判，避免 SQLite 把溢出算成 REAL。
+            if current + qty > MAX_QTY:
+                raise StockOverflowError(
+                    f"入库后库存余额不能超过上限 {MAX_QTY}："
+                    f"当前余额 {current}，本次入库 {qty}"
+                )
+        elif qty > current:
             raise InsufficientStockError(
-                f"出库数量 {qty} 超过当前余额 {product['quantity']}"
+                f"出库数量 {qty} 超过当前余额 {current}"
             )
         delta = qty if mtype == "receive" else -qty
         try:
@@ -99,6 +125,11 @@ class InventoryDB:
                 balance = self.conn.execute(
                     "SELECT quantity FROM products WHERE sku = ?", (sku,)
                 ).fetchone()[0]
+                # 写入后再核验一次类型与范围：任何 REAL/超界都视为失败并回滚。
+                if not isinstance(balance, int) or not 0 <= balance <= MAX_QTY:
+                    raise sqlite3.IntegrityError(
+                        f"余额必须是 0 至 {MAX_QTY} 的整数，得到: {balance!r}"
+                    )
                 cur = self.conn.execute(
                     "INSERT INTO movements (sku, type, quantity, balance) "
                     "VALUES (?, ?, ?, ?)",
@@ -106,9 +137,14 @@ class InventoryDB:
                 )
                 movement_id = cur.lastrowid
         except sqlite3.IntegrityError as exc:
-            # CHECK 兜底：余额被扣成负数（如并发场景）也按超量处理，事务已回滚。
+            # CHECK/并发兜底：事务已回滚，按入库超界或出库超量给出对应错误。
+            if mtype == "receive":
+                raise StockOverflowError(
+                    f"入库后库存余额不能超过上限 {MAX_QTY}："
+                    f"当前余额 {current}，本次入库 {qty}"
+                ) from exc
             raise InsufficientStockError(
-                f"出库数量 {qty} 超过当前余额 {product['quantity']}"
+                f"出库数量 {qty} 超过当前余额 {current}"
             ) from exc
         except sqlite3.Error as exc:
             raise DatabaseError(f"写入数据库失败: {exc}") from exc
