@@ -38,6 +38,25 @@ def positive_int(value):
     return int(text)
 
 
+AFTER_ID_MAX = 9223372036854775807
+
+
+def after_id(value):
+    """流水编号下界：0 至 9223372036854775807 的十进制非负整数，允许前导零。"""
+    text = str(value)
+    if not INTEGER_RE.match(text):
+        raise argparse.ArgumentTypeError(
+            f"--after-id 必须是 0 到 {AFTER_ID_MAX} 之间的十进制非负整数，"
+            f"收到: {value!r}"
+        )
+    number = int(text)
+    if number > AFTER_ID_MAX:
+        raise argparse.ArgumentTypeError(
+            f"--after-id 超出范围（最大 {AFTER_ID_MAX}），收到: {value!r}"
+        )
+    return number
+
+
 def clean_text(value, field):
     text = (value or "").strip()
     if not text:
@@ -69,6 +88,12 @@ def build_parser():
         "--type",
         choices=("receive", "issue"),
         help="按流水类型筛选：receive（入库）或 issue（出库）；缺省返回全部流水",
+    )
+    p_show.add_argument(
+        "--after-id",
+        type=after_id,
+        default=None,
+        help="只返回编号严格大于该值的流水；0 表示从最早流水开始",
     )
     return parser
 
@@ -111,7 +136,7 @@ def run(argv):
             if product is None:
                 print(f"错误: 商品不存在: {sku}", file=sys.stderr)
                 return 2
-            product["movements"] = db.list_movements(sku, args.type)
+            product["movements"] = db.list_movements(sku, args.type, args.after_id)
             emit(product)
             return 0
 

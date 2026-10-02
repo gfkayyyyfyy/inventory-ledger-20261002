@@ -122,8 +122,9 @@ class InventoryDB:
             },
         }
 
-    def list_movements(self, sku, mtype=None):
-        """返回该商品按 id 升序的流水；mtype 非空时只返回对应类型。
+    def list_movements(self, sku, mtype=None, after_id=None):
+        """返回该商品按 id 升序的流水；mtype 非空时只返回对应类型，
+        after_id 非空时只返回 id 严格大于该值的流水，两个条件可同时生效。
 
         筛选只影响返回的行，保留原始 id 与 balance，不重新编号或重算余额。
         """
@@ -135,6 +136,9 @@ class InventoryDB:
         if mtype is not None:
             sql += " AND type = ?"
             params.append(mtype)
+        if after_id is not None:
+            sql += " AND id > ?"
+            params.append(after_id)
         sql += " ORDER BY id ASC"
         try:
             cur = self.conn.execute(sql, params)
