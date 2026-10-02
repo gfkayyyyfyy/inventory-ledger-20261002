@@ -16,12 +16,17 @@ from .storage import (
     InsufficientStockError,
     InventoryDB,
     ProductExistsError,
+    StockLimitError,
 )
 
 INTEGER_RE = re.compile(r"^\d+$")
 
 # SQLite INTEGER 主键的最大值（64 位有符号整数上界）。
 MAX_AFTER_ID = 9223372036854775807
+
+# 单次出入库数量与库存余额的上限：SQLite INTEGER 一旦超过该值做加法
+# 会退化为 REAL（浮点），余额将失去整数精度，因此数量与余额都以此为界。
+MAX_QTY = 9223372036854775807
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -32,13 +37,22 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def positive_int(value):
-    """只接受由数字组成且大于零的整数，拒绝小数、负数、零和非数字。"""
+    """只接受 1 至 2^63-1 的十进制整数。
+
+    拒绝零、负数、小数、非数字以及超过单次数量上限的值；允许前导零，
+    前导零不改变数量含义。提示中包含参数名 --qty、允许范围与收到的值。
+    """
     text = str(value)
     if not INTEGER_RE.match(text) or int(text) <= 0:
         raise argparse.ArgumentTypeError(
-            f"数量必须是大于零的整数，收到: {value!r}"
+            f"--qty 数量必须是 1 至 {MAX_QTY} 之间的整数，收到: {value!r}"
         )
-    return int(text)
+    number = int(text)
+    if number > MAX_QTY:
+        raise argparse.ArgumentTypeError(
+            f"--qty 不能超过单次数量上限 {MAX_QTY}，收到: {value!r}"
+        )
+    return number
 
 
 def after_id(value):
@@ -154,7 +168,7 @@ def run(argv):
         mtype = args.command  # receive 或 issue
         try:
             result = db.move(sku, mtype, args.qty)
-        except InsufficientStockError as exc:
+        except (InsufficientStockError, StockLimitError) as exc:
             print(f"错误: {exc}", file=sys.stderr)
             return 2
         if result is None:

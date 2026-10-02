@@ -10,7 +10,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
     sku      TEXT PRIMARY KEY,
     name     TEXT NOT NULL,
-    quantity INTEGER NOT NULL CHECK (quantity >= 0)
+    quantity INTEGER NOT NULL CHECK (
+        quantity >= 0 AND quantity <= 9223372036854775807
+    )
 );
 CREATE TABLE IF NOT EXISTS movements (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +34,15 @@ class ProductExistsError(Exception):
 
 class InsufficientStockError(Exception):
     """出库数量超过当前余额。"""
+
+
+class StockLimitError(Exception):
+    """入库后余额超过库存上限（64 位有符号整数上界）。"""
+
+
+# 库存余额上限：SQLite 中 INTEGER 与 REAL 做越界加法会退化为 REAL，
+# 因此余额与单次数量都限定在 64 位有符号整数范围内。
+MAX_QUANTITY = 9223372036854775807
 
 
 class InventoryDB:
@@ -79,15 +90,28 @@ class InventoryDB:
     def move(self, sku, mtype, qty):
         """入库/出库：更新余额并插入流水，二者在同一事务内同时生效。
 
-        商品不存在返回 None；出库超过余额抛 InsufficientStockError。
+        商品不存在返回 None；出库超过余额抛 InsufficientStockError；
+        入库后余额超过 MAX_QUANTITY 抛 StockLimitError。调用前 qty 已由
+        CLI 限定在 1..MAX_QUANTITY，此处仍在 Python 侧先做上限判断，
+        避免越界整数加法在 SQLite 中退化为 REAL 而损失精度。
         """
         product = self.get_product(sku)
         if product is None:
             return None
-        if mtype == "issue" and qty > product["quantity"]:
-            raise InsufficientStockError(
-                f"出库数量 {qty} 超过当前余额 {product['quantity']}"
-            )
+        current = product["quantity"]
+        if mtype == "issue":
+            if qty > current:
+                raise InsufficientStockError(
+                    f"出库数量 {qty} 超过当前余额 {current}"
+                )
+            new_balance = current - qty
+        else:
+            new_balance = current + qty
+            if new_balance > MAX_QUANTITY:
+                raise StockLimitError(
+                    f"入库后余额超过库存上限 {MAX_QUANTITY}"
+                    f"（当前余额 {current}，本次数量 {qty}）"
+                )
         delta = qty if mtype == "receive" else -qty
         try:
             # with 块在无异常时提交、有异常时回滚，余额与流水同生共死。
