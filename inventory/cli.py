@@ -22,6 +22,11 @@ from .storage import (
 
 INTEGER_RE = re.compile(r"^\d+$")
 
+# --limit 专用：[0-9] 只匹配 ASCII 数字，拒绝全角数字（２，U+FF12）与
+# 阿拉伯印度数字（٢，U+0662）等 Unicode 数字字符；\A...\Z 锚定整个文本，
+# 不允许开头、结尾或中间出现任何空白（$ 会容忍末尾一个换行，故不能用）。
+LIMIT_DIGITS_RE = re.compile(r"\A[0-9]+\Z")
+
 # SQLite INTEGER 主键的最大值（64 位有符号整数上界）。
 MAX_AFTER_ID = 9223372036854775807
 
@@ -81,18 +86,22 @@ def after_id(value):
 
 
 def limit_count(value):
-    """--limit：1 至 1000 的十进制正整数，只允许数字 0 至 9，允许前导零。
+    """--limit：1 至 1000 的十进制正整数，只允许 ASCII 数字 0 至 9，允许前导零。
 
-    缺值、空字符串、零、负数、小数、正号、两端空白、非数字或超过 1000 时
+    完整参数值参与校验，不做任何去空白或数字字符转换：含空格、制表符、
+    回车、换行（无论在开头、结尾还是中间）一律拒绝；全角数字、阿拉伯印度
+    数字等非 ASCII 数字字符及其与 ASCII 数字混写也一律拒绝。
+    缺值、空字符串、零、负数、小数、正号、非数字或超过 1000 时
     由 argparse 拒绝（退出码 2，提示中包含 --limit 与拒绝原因）。
     前导零不改变数量含义（0002 与 2 等价）。
     """
     text = str(value)
     if not text:
         raise argparse.ArgumentTypeError("--limit 不能为空")
-    if not INTEGER_RE.match(text):
+    if not LIMIT_DIGITS_RE.match(text):
         raise argparse.ArgumentTypeError(
-            f"--limit 必须是只含数字 0 至 9 的十进制正整数，收到: {value!r}"
+            f"--limit 必须是只含 ASCII 数字 0 至 9 的十进制正整数，"
+            f"不能含空白或其他数字字符，收到: {value!r}"
         )
     number = int(text)  # Python 任意精度整数，超大数字也能精确比较
     if number < 1:
@@ -155,7 +164,8 @@ def build_parser():
         metavar="N",
         help=(
             "在 --sku/--type/--after-id 筛选后，按原始 id 升序只返回前 N 条流水；"
-            "接受 1 至 1000 的十进制正整数，允许前导零；缺省返回全部匹配流水"
+            "接受 1 至 1000、仅由 ASCII 数字 0 至 9 组成的非空文本，允许前导零；"
+            "缺省返回全部匹配流水"
         ),
     )
     return parser

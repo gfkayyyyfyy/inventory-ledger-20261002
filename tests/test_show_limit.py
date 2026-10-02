@@ -156,6 +156,147 @@ class TestLimitAcceptanceScenario(InventoryCLITestCase):
         self.assertEqual(self.show(SKU1), before)
 
 
+class TestLimitTwoMovementsAcceptance(InventoryCLITestCase):
+    """验收台账：DEMO-1 演示螺母，入库 10、出库 3，当前数量 7。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add_product(SKU1, NAME1)
+        self.assertEqual(
+            self.run_ok("receive", "--sku", SKU1, "--qty", "10")["quantity"], 10
+        )
+        self.assertEqual(
+            self.run_ok("issue", "--sku", SKU1, "--qty", "3")["quantity"], 7
+        )
+
+    def test_limit_0001_returns_earliest_movement(self):
+        # --limit 0001 成功：单个 JSON 对象，当前 quantity 为 7，
+        # movements 仅含最早的入库流水，数量与余额均为 10。
+        page = self.show(SKU1, limit="0001")
+        self.assertEqual(page["sku"], SKU1)
+        self.assertEqual(page["name"], NAME1)
+        self.assertEqual(page["quantity"], 7)
+        self.assertEqual(
+            movement_tuples(page["movements"]), [(1, "receive", 10, 10)]
+        )
+
+    def test_full_query_still_returns_both_movements_after_rejections(self):
+        # 全角１或数字 1 后附实际换行按参数错误拒绝；随后完整查询仍得到
+        # 原来的两条流水，当前数量仍为 7。
+        for bad in ("１", "1\n"):
+            with self.subTest(limit=bad):
+                self.run_rejected("show", "--sku", SKU1, "--limit", bad)
+        full = self.show(SKU1)
+        self.assertEqual(full["quantity"], 7)
+        self.assertEqual(
+            movement_tuples(full["movements"]),
+            [(1, "receive", 10, 10), (2, "issue", 3, 7)],
+        )
+
+
+class TestLimitUnicodeAndWhitespaceBoundary(InventoryCLITestCase):
+    """--limit 只接受 ASCII 数字 0 至 9 组成、数值 1 至 1000 的非空文本。
+
+    回归点：完整参数值参与校验，不先去空白、不转换数字字符。
+    全角数字、阿拉伯印度数字、混写，以及含空格/制表符/回车/换行
+    （开头、结尾、中间）的值都必须以退出码 2 拒绝，stdout 为空，
+    stderr 含 --limit 与原因且无异常堆栈，数据不变。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_product(SKU1, NAME1)
+        self.run_ok("receive", "--sku", SKU1, "--qty", "10")
+        self.run_ok("issue", "--sku", SKU1, "--qty", "3")
+        self.before = self.show(SKU1)
+
+    INVALID_VALUES = [
+        # 非 ASCII 数字字符（re 的 \d 与 int() 会接受，公开约定不接受）
+        "２",          # 全角数字 2（U+FF12）
+        "٢",           # 阿拉伯印度数字 2（U+0662）
+        "１",          # 全角数字 1（U+FF11）
+        "١",           # 阿拉伯印度数字 1（U+0661）
+        "１2",         # 全角数字与 ASCII 数字混写（开头）
+        "1２",         # 全角数字与 ASCII 数字混写（结尾）
+        "1٢3",         # 阿拉伯印度数字混在中间
+        # 空白出现在开头、结尾或中间（实际制表符/回车/换行，不是字面量）
+        "1\n",         # 数字后附实际换行
+        "\n1",         # 换行在开头
+        "1\n2",        # 换行在中间
+        "1\r",         # 回车在结尾
+        "\r1",         # 回车在开头
+        "1\r2",        # 回车在中间
+        "1\t",         # 制表符在结尾
+        "\t1",         # 制表符在开头
+        "1\t2",        # 制表符在中间
+        "1 2",         # 空格在中间
+        "\n",          # 仅换行
+        "　1",         # 全角空格在开头
+    ]
+
+    def run_cli_with_db(self, db_path, *args):
+        """对指定数据库文件运行 CLI（用于验证非法参数不创建新库）。"""
+        proc = subprocess.run(
+            [sys.executable, "-m", "inventory", "--db", db_path, *args],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def test_non_ascii_digits_and_whitespace_rejected(self):
+        for bad in self.INVALID_VALUES:
+            with self.subTest(limit=bad):
+                code, out, err = self.run_cli(
+                    "show", "--sku", SKU1, "--limit", bad
+                )
+                self.assertEqual(code, 2, f"{bad!r} 应被拒绝，stderr: {err}")
+                self.assertEqual(out, "", f"{bad!r} 被拒绝时 stdout 应为空")
+                self.assertIn("--limit", err)
+                # 简洁参数错误，不允许出现异常堆栈。
+                self.assertNotIn("Traceback", err)
+                # 每次拒绝后商品与流水均不变。
+                self.assertEqual(self.show(SKU1), self.before)
+
+    def test_ascii_values_still_valid(self):
+        # 1、1000 与前导零继续合法；匹配条数少于 N 时全部返回。
+        for value, expected_len in (("1", 1), ("0001", 1), ("1000", 2), ("01000", 2)):
+            with self.subTest(limit=value):
+                page = self.show(SKU1, limit=value)
+                self.assertEqual(page["quantity"], 7)
+                self.assertEqual(len(page["movements"]), expected_len)
+
+    def test_invalid_limit_does_not_create_database(self):
+        # 非法条数查询不创建尚不存在的数据库文件（参数校验先于打开数据库）。
+        fresh = str(Path(self._tmp.name) / "not-created.db")
+        for bad in ("２", "٢", "1\n", "1 2", "0", "1001"):
+            with self.subTest(limit=bad):
+                code, out, err = self.run_cli_with_db(
+                    fresh, "show", "--sku", SKU1, "--limit", bad
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("--limit", err)
+                self.assertNotIn("Traceback", err)
+                self.assertFalse(
+                    Path(fresh).exists(), f"{bad!r} 不应创建数据库文件"
+                )
+
+    def test_invalid_limit_precedes_nonexistent_sku(self):
+        # 即使同时指定不存在的 SKU，也先报告参数错误，且不创建数据库文件。
+        fresh = str(Path(self._tmp.name) / "missing-sku.db")
+        for bad in ("２", "٢", "1\n", "1 2", "0", "1001"):
+            with self.subTest(limit=bad):
+                code, out, err = self.run_cli_with_db(
+                    fresh, "show", "--sku", "NO-SUCH-SKU", "--limit", bad
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("--limit", err)
+                self.assertNotIn("Traceback", err)
+                self.assertFalse(Path(fresh).exists())
+
+
 class TestLimitFiltering(InventoryCLITestCase):
     """跨商品交错编号时，名额只在当前 SKU 已筛选流水内计数。"""
 
