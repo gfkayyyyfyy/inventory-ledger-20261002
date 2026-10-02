@@ -122,13 +122,22 @@ class InventoryDB:
             },
         }
 
-    def list_movements(self, sku):
+    def list_movements(self, sku, mtype=None):
+        """返回该商品按 id 升序的流水；mtype 非空时只返回对应类型。
+
+        筛选只影响返回的行，保留原始 id 与 balance，不重新编号或重算余额。
+        """
+        sql = (
+            "SELECT id, type, quantity, balance FROM movements "
+            "WHERE sku = ?"
+        )
+        params = [sku]
+        if mtype is not None:
+            sql += " AND type = ?"
+            params.append(mtype)
+        sql += " ORDER BY id ASC"
         try:
-            cur = self.conn.execute(
-                "SELECT id, type, quantity, balance FROM movements "
-                "WHERE sku = ? ORDER BY id ASC",
-                (sku,),
-            )
+            cur = self.conn.execute(sql, params)
         except sqlite3.Error as exc:
             raise DatabaseError(f"读取数据库失败: {exc}") from exc
         return [
