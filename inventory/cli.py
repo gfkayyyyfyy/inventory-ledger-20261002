@@ -28,6 +28,10 @@ MAX_AFTER_ID = 9223372036854775807
 # show --limit 单次最多返回的流水条数。
 MAX_LIMIT = 1000
 
+# 只接受 ASCII 数字 0 至 9：[0-9] 不匹配全角数字（２）或阿拉伯印度数字（٢），
+# \A/\Z 严格锚定整个文本（$ 会匹配结尾换行前的位置），任何空白都无法通过。
+LIMIT_DIGITS_RE = re.compile(r"\A[0-9]+\Z")
+
 
 class ArgumentParser(argparse.ArgumentParser):
     """让参数错误以简洁中文提示输出到 stderr，退出码仍为 2。"""
@@ -81,18 +85,18 @@ def after_id(value):
 
 
 def limit_count(value):
-    """--limit：1 至 1000 的十进制正整数，只允许数字 0 至 9，允许前导零。
+    """--limit：1 至 1000 的十进制正整数，只允许 ASCII 数字 0 至 9，允许前导零。
 
-    缺值、空字符串、零、负数、小数、正号、两端空白、非数字或超过 1000 时
-    由 argparse 拒绝（退出码 2，提示中包含 --limit 与拒绝原因）。
-    前导零不改变数量含义（0002 与 2 等价）。
+    完整参数值直接参与校验，不先 strip 也不做数字字符转换：空格、制表符、
+    回车、换行（无论在开头、结尾还是中间）、全角数字（２）、阿拉伯印度数字
+    （٢）及其与 ASCII 数字的混写都按参数错误拒绝。缺值、空字符串、零、负数、
+    小数、正号、非数字或超过 1000 同样由 argparse 拒绝（退出码 2，提示中
+    包含 --limit 与拒绝原因）。前导零不改变数量含义（0002 与 2 等价）。
     """
     text = str(value)
-    if not text:
-        raise argparse.ArgumentTypeError("--limit 不能为空")
-    if not INTEGER_RE.match(text):
+    if not text or LIMIT_DIGITS_RE.match(text) is None:
         raise argparse.ArgumentTypeError(
-            f"--limit 必须是只含数字 0 至 9 的十进制正整数，收到: {value!r}"
+            f"--limit 必须是只含 ASCII 数字 0 至 9 的十进制正整数，收到: {value!r}"
         )
     number = int(text)  # Python 任意精度整数，超大数字也能精确比较
     if number < 1:

@@ -363,5 +363,134 @@ class TestInvalidLimitRejected(InventoryCLITestCase):
         self.assertEqual(out, "")
 
 
+class TestLimitStrictASCIIBoundary(InventoryCLITestCase):
+    """回归：--limit 的完整参数值必须只由 ASCII 数字 0 至 9 组成。
+
+    全角数字、阿拉伯印度数字及它们与 ASCII 数字的混写，含空格/制表符/
+    回车/换行（无论在开头、结尾还是中间）的值，都必须以退出码 2 拒绝，
+    stdout 为空、stderr 包含 --limit 与原因且无异常堆栈；非法查询不创建
+    数据库文件，也不改变已有商品和流水。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_product(SKU1, NAME1)
+        self.assertEqual(
+            self.run_ok("receive", "--sku", SKU1, "--qty", "10")["quantity"], 10
+        )
+        self.assertEqual(
+            self.run_ok("issue", "--sku", SKU1, "--qty", "3")["quantity"], 7
+        )
+        self.before = self.show(SKU1)
+        self.assertEqual(
+            movement_tuples(self.before["movements"]),
+            [(1, "receive", 10, 10), (2, "issue", 3, 7)],
+        )
+
+    def assert_limit_rejected(self, bad):
+        code, out, err = self.run_cli("show", "--sku", SKU1, "--limit", bad)
+        self.assertEqual(code, 2, f"--limit {bad!r} 应以退出码 2 拒绝")
+        self.assertEqual(out, "", f"--limit {bad!r} 被拒绝时 stdout 应为空")
+        self.assertIn("--limit", err, f"stderr 应包含 --limit：{err!r}")
+        self.assertTrue(err.strip(), f"stderr 应说明原因：{bad!r}")
+        # 参数错误在打开数据库之前报告，不输出异常堆栈。
+        self.assertNotIn("Traceback", err)
+        # 被拒绝后商品与流水原样不变。
+        self.assertEqual(self.show(SKU1), self.before)
+
+    def test_fullwidth_digits_rejected(self):
+        # 全角数字（含与 ASCII 数字混写）不是 ASCII 数字 0 至 9。
+        for bad in ("１", "２", "０００１", "1２", "２1"):
+            with self.subTest(limit=bad):
+                self.assert_limit_rejected(bad)
+
+    def test_arabic_indic_digits_rejected(self):
+        # 阿拉伯印度数字及混写同样拒绝。
+        for bad in ("١", "٢", "٠٠٠١", "1٢", "٢1"):
+            with self.subTest(limit=bad):
+                self.assert_limit_rejected(bad)
+
+    def test_embedded_whitespace_rejected(self):
+        # 参数整体参与校验：空白出现在开头、结尾、中间都拒绝；
+        # 特别覆盖数字后附实际换行（$ 会错误地匹配换行前的位置）。
+        for bad in (
+            "1 ",      # 尾随空格
+            " 1",      # 前导空格
+            "1 2",     # 中间空格
+            "1\t",     # 尾随制表符
+            "\t1",     # 前导制表符
+            "1\t2",    # 中间制表符
+            "1\n",     # 尾随换行
+            "\n1",     # 前导换行
+            "1\n2",    # 中间换行
+            "1\r",     # 尾随回车
+            "\r1",     # 前导回车
+            "1\r\n",   # 尾随 CRLF
+            "1\r2",    # 中间回车
+            " 1\n",    # 空格与换行混合
+            "\v1",     # 其他 ASCII 空白
+        ):
+            with self.subTest(limit=bad):
+                self.assert_limit_rejected(bad)
+
+    def test_ascii_digits_still_valid(self):
+        # 1、1000、前导零继续合法。
+        for good, expected_len in (("1", 1), ("1000", 2), ("0001", 1)):
+            with self.subTest(limit=good):
+                page = self.show(SKU1, limit=good)
+                self.assertEqual(page["quantity"], 7)
+                self.assertEqual(len(page["movements"]), expected_len)
+
+    def test_leading_zeros_returns_earliest_movement(self):
+        # 用户验收主场景：--limit 0001 只含最早的入库流水，
+        # 数量与余额均为 10，商品当前数量为 7。
+        page = self.show(SKU1, limit="0001")
+        self.assertEqual(page["quantity"], 7)
+        self.assertEqual(
+            movement_tuples(page["movements"]), [(1, "receive", 10, 10)]
+        )
+
+    def test_existing_rejections_still_hold(self):
+        # 缺值、空字符串、全零、正负号、小数、非数字、超过 1000 继续拒绝。
+        for bad in (
+            "", "0", "0000", "-1", "+1", "1.5", ".5", "abc",
+            "1e3", "0x1", "1001", "99999",
+        ):
+            with self.subTest(limit=bad):
+                self.assert_limit_rejected(bad)
+
+    def test_rejected_value_with_nonexistent_sku_reports_param_error(self):
+        # 即使同时指定不存在的 SKU，也先报告 --limit 参数错误。
+        for bad in ("２", "٢", "1\n"):
+            with self.subTest(limit=bad):
+                code, out, err = self.run_cli(
+                    "show", "--sku", "NO-SUCH-SKU", "--limit", bad
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("--limit", err)
+                self.assertNotIn("Traceback", err)
+
+    def test_invalid_limit_does_not_create_database(self):
+        # 非法条数查询不创建尚不存在的数据库文件。
+        fresh = str(Path(self._tmp.name) / "fresh.db")
+        self.assertFalse(Path(fresh).exists())
+        proc = subprocess.run(
+            [
+                sys.executable, "-m", "inventory", "--db", fresh,
+                "show", "--sku", SKU1, "--limit", "1\n",
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("--limit", proc.stderr)
+        self.assertFalse(
+            Path(fresh).exists(), "非法 --limit 不应创建数据库文件"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
