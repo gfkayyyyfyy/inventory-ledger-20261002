@@ -25,6 +25,9 @@ INTEGER_RE = re.compile(r"^\d+$")
 # SQLite INTEGER 主键的最大值（64 位有符号整数上界）。
 MAX_AFTER_ID = 9223372036854775807
 
+# show --limit 一次最多返回的流水条数。
+MAX_LIMIT = 1000
+
 
 class ArgumentParser(argparse.ArgumentParser):
     """让参数错误以简洁中文提示输出到 stderr，退出码仍为 2。"""
@@ -77,6 +80,29 @@ def after_id(value):
     return number
 
 
+def limit(value):
+    """--limit：1 至 1000 的十进制正整数，允许前导零（0002 与 2 等价）。
+
+    缺值、空字符串、零、负数、小数、带正号、两端空白、非数字或超过 1000
+    时由 argparse 拒绝（退出码 2，提示中包含 --limit 与拒绝原因）。
+    """
+    text = str(value)
+    if not text or not INTEGER_RE.match(text):
+        raise argparse.ArgumentTypeError(
+            f"--limit 必须是只含数字 0-9 的十进制正整数，收到: {value!r}"
+        )
+    number = int(text)  # Python 任意精度整数，超大数字也能精确比较
+    if number == 0:
+        raise argparse.ArgumentTypeError(
+            f"--limit 必须大于或等于 1，收到: {value!r}"
+        )
+    if number > MAX_LIMIT:
+        raise argparse.ArgumentTypeError(
+            f"--limit 不能超过 {MAX_LIMIT}，收到: {value!r}"
+        )
+    return number
+
+
 def clean_text(value, field):
     text = (value or "").strip()
     if not text:
@@ -117,6 +143,17 @@ def build_parser():
         help=(
             "只返回该 SKU 中编号严格大于 ID 的流水（0 表示从最早流水开始）；"
             "接受 0 至 9223372036854775807 的十进制整数，允许前导零"
+        ),
+    )
+    p_show.add_argument(
+        "--limit",
+        type=limit,
+        default=None,
+        metavar="N",
+        help=(
+            "限定返回的流水条数：先按 SKU、--type、--after-id 筛选，"
+            "再按原始 id 升序取前 N 条（1 至 1000，允许前导零）；"
+            "缺省返回全部匹配流水"
         ),
     )
     return parser
@@ -161,7 +198,7 @@ def run(argv):
                 print(f"错误: 商品不存在: {sku}", file=sys.stderr)
                 return 2
             product["movements"] = db.list_movements(
-                sku, args.type, args.after_id
+                sku, args.type, args.after_id, args.limit
             )
             emit(product)
             return 0

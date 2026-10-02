@@ -158,12 +158,14 @@ class InventoryDB:
             },
         }
 
-    def list_movements(self, sku, mtype=None, after_id=None):
-        """返回该商品按 id 升序的流水；可按类型与编号下界筛选。
+    def list_movements(self, sku, mtype=None, after_id=None, limit=None):
+        """返回该商品按 id 升序的流水；可按类型、编号下界筛选并限定条数。
 
         - mtype 非空时只返回对应类型；
         - after_id 非空时只返回 id 严格大于该值的流水，下界无需真实存在，
-          也无需属于当前 SKU。
+          也无需属于当前 SKU；
+        - limit 非空时在上述筛选之后按 id 升序只取前 limit 条，名额只在
+          当前 SKU 的匹配流水中分配。
         筛选只影响返回的行，保留原始 id 与 balance，不重新编号或重算余额。
         """
         sql = (
@@ -178,6 +180,12 @@ class InventoryDB:
             sql += " AND type = ?"
             params.append(mtype)
         sql += " ORDER BY id ASC"
+        if limit is not None:
+            # 防御性校验：正常入口已由 CLI 的 limit 保证为正整数。
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+                raise ValueError(f"limit 必须是正整数，收到: {limit!r}")
+            sql += " LIMIT ?"
+            params.append(limit)
         try:
             cur = self.conn.execute(sql, params)
         except sqlite3.Error as exc:
