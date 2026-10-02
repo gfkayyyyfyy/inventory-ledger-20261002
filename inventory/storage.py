@@ -158,14 +158,20 @@ class InventoryDB:
             },
         }
 
-    def list_movements(self, sku, mtype=None, after_id=None):
-        """返回该商品按 id 升序的流水；可按类型与编号下界筛选。
+    def list_movements(self, sku, mtype=None, after_id=None, limit=None):
+        """返回该商品按 id 升序的流水；可按类型、编号下界筛选并限定条数。
 
         - mtype 非空时只返回对应类型；
         - after_id 非空时只返回 id 严格大于该值的流水，下界无需真实存在，
-          也无需属于当前 SKU。
+          也无需属于当前 SKU；
+        - limit 非空时在上述筛选与 id 升序排序之后只取前 limit 条，
+          其他商品的流水不占名额。
         筛选只影响返回的行，保留原始 id 与 balance，不重新编号或重算余额。
         """
+        # 防御性校验：正常入口已由 CLI 的 limit_count 保证，此处确保
+        # 直接调用本层时也不会把非法值交给 SQL 的 LIMIT。
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            raise ValueError(f"limit 必须是正整数，收到: {limit!r}")
         sql = (
             "SELECT id, type, quantity, balance FROM movements "
             "WHERE sku = ?"
@@ -178,6 +184,11 @@ class InventoryDB:
             sql += " AND type = ?"
             params.append(mtype)
         sql += " ORDER BY id ASC"
+        if limit is not None:
+            # LIMIT 在 WHERE 筛选与排序之后生效，截断的只是当前 SKU
+            # 已筛选的结果，其他商品的行不参与计数。
+            sql += " LIMIT ?"
+            params.append(limit)
         try:
             cur = self.conn.execute(sql, params)
         except sqlite3.Error as exc:
