@@ -21,7 +21,11 @@ from .storage import (
     StockOverflowError,
 )
 
-INTEGER_RE = re.compile(r"^\d+$")
+# --after-id 专用：\d 按 Unicode 语义接受各文字的十进制数字字符
+# （ASCII 0-9、全角 U+FF10..FF19、阿拉伯印度 U+0660..U+0669 等）；
+# \A...\Z 锚定整个文本，不允许开头、结尾或中间出现任何空白
+# （$ 会容忍末尾一个换行，故不能用）。
+INTEGER_RE = re.compile(r"\A\d+\Z")
 
 
 def decimal_digits(text):
@@ -105,12 +109,23 @@ def positive_int(value):
 def after_id(value):
     """--after-id：0 至 2^63-1 的十进制非负整数，允许前导零。
 
-    缺值、空字符串、负数、小数、非数字或超出范围时由 argparse 拒绝
-    （退出码 2，提示中包含参数名与原因）。
+    完整参数值参与校验，不做任何去空白：含空格、制表符、回车、换行
+    （无论在开头、结尾还是中间）一律以参数错误拒绝，数字后附单个换行
+    也不例外（正则的 $ 会容忍末尾换行，故用 \\A...\\Z 锚定整段文本）。
+    缺值、空字符串、负数、小数、正号、非数字或超出范围时同样由
+    argparse 拒绝（退出码 2，提示中包含参数名与原因）。
     """
     text = str(value)
     if not text:
         raise argparse.ArgumentTypeError("--after-id 不能为空")
+    # 显式检查整段文本中的空白，给出含“不能含空白”的拒绝原因；
+    # 不先 strip：空白位于开头、中间或结尾都以同一原因拒绝。
+    if any(ch.isspace() for ch in text):
+        raise argparse.ArgumentTypeError(
+            f"--after-id 必须是完整的十进制非负整数，不能含空白"
+            f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
+            f"收到: {value!r}"
+        )
     if not INTEGER_RE.match(text):
         raise argparse.ArgumentTypeError(
             f"--after-id 必须是十进制非负整数，收到: {value!r}"
@@ -213,7 +228,8 @@ def build_parser():
         metavar="ID",
         help=(
             "只返回该 SKU 中编号严格大于 ID 的流水（0 表示从最早流水开始）；"
-            "接受 0 至 9223372036854775807 的十进制整数，允许前导零"
+            "接受 0 至 9223372036854775807 的十进制整数，允许前导零；"
+            "完整参数值不能含空格、制表符、回车或换行（无论在开头、中间还是结尾）"
         ),
     )
     p_show.add_argument(
