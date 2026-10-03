@@ -410,6 +410,98 @@ class TestLimitEdgeValues(InventoryCLITestCase):
         self.assertEqual(page["movements"], [])
 
 
+class TestLimitOverlongDigitText(InventoryCLITestCase):
+    """超长数字文本：不依赖解释器整数转换限制（Python 3.11+ 默认 4300 位）。
+
+    5000 位的参数文本不做长度限制：全 9 按超过 1000 拒绝，全 0 按零拒绝，
+    前导零后接 1/1000 与普通参数 1/1000 等价；拒绝均为退出码 2、
+    stdout 为空、stderr 含 --limit 与原因且无异常堆栈，且不创建数据库文件。
+    """
+
+    NINES = "9" * 5000
+    ZEROS = "0" * 5000
+
+    def run_cli_with_db(self, db_path, *args):
+        proc = subprocess.run(
+            [sys.executable, "-m", "inventory", "--db", db_path, *args],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def assert_rejected_cleanly(self, db_path, sku, value):
+        code, out, err = self.run_cli_with_db(
+            db_path, "show", "--sku", sku, "--limit", value
+        )
+        self.assertEqual(code, 2, f"{value[:10]!r}... 应被拒绝，stderr: {err}")
+        self.assertEqual(out, "")
+        self.assertIn("--limit", err)
+        self.assertNotIn("Traceback", err)
+        return err
+
+    def test_5000_nines_rejected_over_upper_bound(self):
+        fresh = str(Path(self._tmp.name) / "not-created.db")
+        err = self.assert_rejected_cleanly(fresh, "NO-SUCH-SKU", self.NINES)
+        # 错误信息包含允许的上限 1000 与拒绝原因。
+        self.assertIn("1000", err)
+        # 参数校验先于打开数据库，不创建文件。
+        self.assertFalse(Path(fresh).exists())
+
+    def test_5000_zeros_rejected_as_zero(self):
+        fresh = str(Path(self._tmp.name) / "not-created.db")
+        err = self.assert_rejected_cleanly(fresh, "NO-SUCH-SKU", self.ZEROS)
+        self.assertIn("1000", err)
+        self.assertFalse(Path(fresh).exists())
+
+    def test_5000_zeros_then_value_equivalent(self):
+        self.add_product(SKU1, NAME1)
+        self.run_ok("receive", "--sku", SKU1, "--qty", "10")
+        self.run_ok("issue", "--sku", SKU1, "--qty", "3")
+        # 5000 个 0 后接 1：与普通参数 1 完全等价。
+        page = self.show(SKU1, limit=self.ZEROS + "1")
+        self.assertEqual(page["quantity"], 7)
+        self.assertEqual(
+            movement_tuples(page["movements"]), [(1, "receive", 10, 10)]
+        )
+        # 5000 个 0 后接 1000：与普通参数 1000 完全等价（两条流水全返回）。
+        page = self.show(SKU1, limit=self.ZEROS + "1000")
+        self.assertEqual(
+            movement_tuples(page["movements"]),
+            [(1, "receive", 10, 10), (2, "issue", 3, 7)],
+        )
+
+    def test_illegal_characters_in_long_text_rejected(self):
+        fresh = str(Path(self._tmp.name) / "not-created.db")
+        bad_values = [
+            self.ZEROS + " ",
+            self.ZEROS + "\t1",
+            self.ZEROS + "\r1",
+            self.ZEROS + "\n1",
+            self.ZEROS + "+1",
+            self.ZEROS + "-1",
+            self.ZEROS + "1.0",
+            self.ZEROS + "１",
+            self.ZEROS + "١",
+        ]
+        for value in bad_values:
+            with self.subTest(tail=value[-2:]):
+                self.assert_rejected_cleanly(fresh, "NO-SUCH-SKU", value)
+        self.assertFalse(Path(fresh).exists())
+
+    def test_after_rejection_unlimited_query_unchanged(self):
+        self.add_product(SKU1, NAME1)
+        self.run_ok("receive", "--sku", SKU1, "--qty", "10")
+        self.run_ok("issue", "--sku", SKU1, "--qty", "3")
+        self.run_rejected("show", "--sku", SKU1, "--limit", self.NINES)
+        full = self.show(SKU1)
+        self.assertEqual(full["quantity"], 7)
+        self.assertEqual(
+            movement_tuples(full["movements"]),
+            [(1, "receive", 10, 10), (2, "issue", 3, 7)],
+        )
+
+
 class TestInvalidLimitRejected(InventoryCLITestCase):
     """非法 --limit：退出码 2、stdout 为空、stderr 含 --limit 与原因、数据不变。"""
 

@@ -103,16 +103,22 @@ def limit_count(value):
             f"--limit 必须是只含 ASCII 数字 0 至 9 的十进制正整数，"
             f"不能含空白或其他数字字符，收到: {value!r}"
         )
-    number = int(text)  # Python 任意精度整数，超大数字也能精确比较
-    if number < 1:
+    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
+    # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
+    # 文本已由上面的正则保证只含 ASCII 数字，去掉前导零后按位数与逐字比较
+    # 即可判断 1 至 1000 的范围，参数文本长度不受限制；前导零不改变数值，
+    # 因此 5000 个 0 后接 1 与普通参数 1 完全等价。
+    digits = text.lstrip("0")
+    if not digits:
         raise argparse.ArgumentTypeError(
             f"--limit 必须是 1 至 {MAX_LIMIT} 的正整数，收到: {value!r}"
         )
-    if number > MAX_LIMIT:
+    upper = str(MAX_LIMIT)
+    if len(digits) > len(upper) or (len(digits) == len(upper) and digits > upper):
         raise argparse.ArgumentTypeError(
             f"--limit 不能超过单次返回条数上限 {MAX_LIMIT}，收到: {value!r}"
         )
-    return number
+    return int(digits)
 
 
 def clean_text(value, field):
