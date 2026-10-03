@@ -10,6 +10,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 
 from .storage import (
     DatabaseError,
@@ -21,6 +22,25 @@ from .storage import (
 )
 
 INTEGER_RE = re.compile(r"^\d+$")
+
+
+def decimal_digits(text):
+    """把 Unicode 十进制数字文本逐字符转写为 ASCII 数字（0 至 9）。
+
+    Python 的 int() 与正则 \\d 都按 Unicode 语义接受各文字的十进制数字
+    （如全角 U+FF10..FF19、阿拉伯印度 U+0660..U+0669、U+06F0..U+06F9
+    的扩展阿拉伯印度数字等），但 int() 还容忍空白与下划线，逐字符转换可以
+    精确限定只接受十进制数字字符；遇到任一非数字字符返回 None。
+    """
+    digits = []
+    for ch in text:
+        try:
+            value = unicodedata.decimal(ch)
+        except ValueError:
+            return None
+        digits.append(str(value))
+    return "".join(digits)
+
 
 # --limit 专用：[0-9] 只匹配 ASCII 数字，拒绝全角数字（２，U+FF12）与
 # 阿拉伯印度数字（٢，U+0662）等 Unicode 数字字符；\A...\Z 锚定整个文本，
@@ -44,21 +64,28 @@ class ArgumentParser(argparse.ArgumentParser):
 def positive_int(value):
     """只接受 1 至 MAX_QTY 的十进制正整数，允许前导零（不改变数量含义）。
 
-    零、负数、小数、非数字按“数量无效”拒绝；超过 MAX_QTY 时提示中包含
-    --qty 与允许的上限。两类错误都由 argparse 以退出码 2 拒绝。
+    十进制数字以 Unicode 十进制数字字符为准：ASCII 0-9、全角数字
+    （U+FF10 等）、阿拉伯印度数字（U+0660 等）及其他文字的十进制
+    数字字符都按同一数值处理。零（含 "0"、"000"、"０"、"٠"、
+    "0０٠" 等任意零字符组合）、负数、小数、非数字按“数量无效”拒绝；
+    超过 MAX_QTY 时提示中包含 --qty 与允许的上限。两类错误都由
+    argparse 以退出码 2 拒绝，且发生在打开数据库之前。
     """
     text = str(value)
-    if not INTEGER_RE.match(text):
+    # 逐字符按 Unicode 十进制数值转写，等价于 int() 能接受的数字集合，
+    # 但显式拒绝 int() 同样容忍的空白与下划线，确保“纯十进制数字文本”。
+    digits = decimal_digits(text)
+    if digits is None:
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
     # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
     # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
-    # 前导零不改变数值，先去掉再判断，因此 5000 个 0 后接 10 与普通参数
-    # 10 完全等价，参数文本长度不受限制。
-    digits = text.lstrip("0")
+    # 前导零（任何文字的十进制零字符）不改变数值，先去掉再判断，因此
+    # 5000 个 0 后接 10 与普通参数 10 完全等价，参数文本长度不受限制。
+    digits = digits.lstrip("0")
     if not digits:
-        # 整段都是前导零：数值为零，按数量无效拒绝。
+        # 整段都是零字符：实际数值为零，按数量无效拒绝。
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
