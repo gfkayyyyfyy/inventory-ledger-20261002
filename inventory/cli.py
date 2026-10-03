@@ -52,16 +52,22 @@ def positive_int(value):
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
-    number = int(text)  # Python 任意精度整数，超大数字也能精确比较
-    if number <= 0:
+    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
+    # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
+    # 去掉前导零后按位数与逐字比较即可判断 1 至 MAX_QTY 的范围，参数文本
+    # 长度不受限制；前导零不改变数值，因此 5000 个 0 后接 10 与普通的
+    # 参数 10 完全等价。
+    digits = text.lstrip("0")
+    if not digits:
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
-    if number > MAX_QTY:
+    upper = str(MAX_QTY)
+    if len(digits) > len(upper) or (len(digits) == len(upper) and digits > upper):
         raise argparse.ArgumentTypeError(
             f"--qty 不能超过单次数量上限 {MAX_QTY}，收到: {value!r}"
         )
-    return number
+    return int(digits)  # 去掉前导零后至多 19 位，转换不受位数限制
 
 
 def after_id(value):
