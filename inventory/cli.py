@@ -88,7 +88,22 @@ def after_id(value):
         raise argparse.ArgumentTypeError(
             f"--after-id 必须是十进制非负整数，收到: {value!r}"
         )
-    number = int(text)
+    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
+    # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
+    # 前导零不改变数值，先去掉再判断，因此 5000 个 0 后接 1 与普通参数 1
+    # 完全等价，5000 个 0 本身等价于 0，参数文本长度不受限制。
+    digits = text.lstrip("0")
+    if not digits:
+        # 整段都是前导零：数值为零，是合法下界（0 表示从最早流水开始）。
+        return 0
+    # 有效数字比上限的位数还多，数值必然超过上限（20 位十进制数至少为
+    # 10^19），无需转换即可拒绝。
+    if len(digits) > len(str(MAX_AFTER_ID)):
+        raise argparse.ArgumentTypeError(
+            f"--after-id 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    # 位数不超过上限位数（19 位），转换不受默认位数限制影响，再精确比较。
+    number = int(digits)
     if number > MAX_AFTER_ID:
         raise argparse.ArgumentTypeError(
             f"--after-id 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
