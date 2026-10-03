@@ -10,6 +10,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 
 from .storage import (
     DatabaseError,
@@ -41,9 +42,30 @@ class ArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"错误: {message}\n")
 
 
+def decimal_digits(value):
+    """把十进制数字文本逐字符转成对应的 ASCII 数字。
+
+    接受 ASCII 数字（0-9）、全角数字（U+FF10 起）、阿拉伯印度数字
+    （U+0660 起）等一切 Unicode 十进制数字（General_Category=Nd，
+    即 INTEGER_RE 能匹配的字符），并允许不同体系的零字符混写；
+    返回每个字符数值（0-9）拼接成的文本。出现任何非十进制数字字符
+    （空白、正负号、小数点、字母等）时返回 None。
+    """
+    digits = []
+    for ch in str(value):
+        try:
+            digits.append(str(unicodedata.decimal(ch)))
+        except ValueError:
+            return None
+    return "".join(digits)
+
+
 def positive_int(value):
     """只接受 1 至 MAX_QTY 的十进制正整数，允许前导零（不改变数量含义）。
 
+    数字字符包括 ASCII 数字与全角、阿拉伯印度等 Unicode 十进制数字
+    （INTEGER_RE 的 \\d 可匹配的字符），允许不同体系混写：纯数字文本只要
+    实际数值为零（"0"、"000"、"０"、"٠"、"0０٠" 等）就按“数量无效”拒绝。
     零、负数、小数、非数字按“数量无效”拒绝；超过 MAX_QTY 时提示中包含
     --qty 与允许的上限。两类错误都由 argparse 以退出码 2 拒绝。
     """
@@ -52,13 +74,18 @@ def positive_int(value):
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
+    # 正则的 \\d 会放行全角、阿拉伯印度等 Unicode 十进制数字，但
+    # lstrip("0") 与文本长度比较只认 ASCII 数字，因此先逐字符统一换算成
+    # ASCII 数字再按数值判断（NFKC 不会折叠阿拉伯印度数字，不能用它归一）。
+    digits = decimal_digits(text)
     # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
     # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
     # 前导零不改变数值，先去掉再判断，因此 5000 个 0 后接 10 与普通参数
     # 10 完全等价，参数文本长度不受限制。
-    digits = text.lstrip("0")
+    digits = digits.lstrip("0")
     if not digits:
-        # 整段都是前导零：数值为零，按数量无效拒绝。
+        # 整段都是前导零（含全角零、阿拉伯印度零及其混写）：数值为零，
+        # 按数量无效拒绝。
         raise argparse.ArgumentTypeError(
             f"数量必须是大于零的整数，收到: {value!r}"
         )
