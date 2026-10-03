@@ -34,6 +34,14 @@ MAX_AFTER_ID = 9223372036854775807
 MAX_LIMIT = 1000
 
 
+def _short_repr(value, max_len=64):
+    """错误提示中回显参数值：短文本原样 repr，超长文本截断并标注总长度。"""
+    text = repr(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(共 {len(str(value))} 字符)"
+
+
 class ArgumentParser(argparse.ArgumentParser):
     """让参数错误以简洁中文提示输出到 stderr，退出码仍为 2。"""
 
@@ -94,6 +102,9 @@ def limit_count(value):
     缺值、空字符串、零、负数、小数、正号、非数字或超过 1000 时
     由 argparse 拒绝（退出码 2，提示中包含 --limit 与拒绝原因）。
     前导零不改变数量含义（0002 与 2 等价）。
+    数字文本长度不限：先按字符规则校验，再去掉前导零按位数与
+    MAX_LIMIT 比较，避免把超长文本直接交给 int()（Python 3.11+
+    默认限制整数字符串转换位数，超长输入会抛出 ValueError）。
     """
     text = str(value)
     if not text:
@@ -101,16 +112,21 @@ def limit_count(value):
     if not LIMIT_DIGITS_RE.match(text):
         raise argparse.ArgumentTypeError(
             f"--limit 必须是只含 ASCII 数字 0 至 9 的十进制正整数，"
-            f"不能含空白或其他数字字符，收到: {value!r}"
+            f"不能含空白或其他数字字符，收到: {_short_repr(value)}"
         )
-    number = int(text)  # Python 任意精度整数，超大数字也能精确比较
-    if number < 1:
+    digits = text.lstrip("0")  # 前导零不改变数值，去掉后按位数比较
+    if not digits:
         raise argparse.ArgumentTypeError(
-            f"--limit 必须是 1 至 {MAX_LIMIT} 的正整数，收到: {value!r}"
+            f"--limit 必须是 1 至 {MAX_LIMIT} 的正整数，收到: {_short_repr(value)}"
         )
+    if len(digits) > len(str(MAX_LIMIT)):
+        raise argparse.ArgumentTypeError(
+            f"--limit 不能超过单次返回条数上限 {MAX_LIMIT}，收到: {_short_repr(value)}"
+        )
+    number = int(digits)  # 至多 4 位，远低于默认整数转换位数限制
     if number > MAX_LIMIT:
         raise argparse.ArgumentTypeError(
-            f"--limit 不能超过单次返回条数上限 {MAX_LIMIT}，收到: {value!r}"
+            f"--limit 不能超过单次返回条数上限 {MAX_LIMIT}，收到: {_short_repr(value)}"
         )
     return number
 
