@@ -21,13 +21,6 @@ from .storage import (
     StockOverflowError,
 )
 
-# --after-id 专用：\d 按 Unicode 语义接受各文字的十进制数字字符
-# （ASCII 0-9、全角 U+FF10..FF19、阿拉伯印度 U+0660..U+0669 等）；
-# \A...\Z 锚定整个文本，不允许开头、结尾或中间出现任何空白
-# （$ 会容忍末尾一个换行，故不能用）。
-INTEGER_RE = re.compile(r"\A\d+\Z")
-
-
 def decimal_digits(text):
     """把 Unicode 十进制数字文本逐字符转写为 ASCII 数字（0 至 9）。
 
@@ -109,11 +102,14 @@ def positive_int(value):
 def after_id(value):
     """--after-id：0 至 2^63-1 的十进制非负整数，允许前导零。
 
+    十进制数字以 Unicode 十进制数字字符为准：ASCII 0-9、全角数字
+    （U+FF10 等）、阿拉伯印度数字（U+0660 等）及其他文字的十进制
+    数字字符都按同一数值处理，允许不同文字的数字混写。
     完整参数值参与校验，不做任何去空白：含空格、制表符、回车、换行
     （无论在开头、结尾还是中间）一律以参数错误拒绝，数字后附单个换行
-    也不例外（正则的 $ 会容忍末尾换行，故用 \\A...\\Z 锚定整段文本）。
-    缺值、空字符串、负数、小数、正号、非数字或超出范围时同样由
-    argparse 拒绝（退出码 2，提示中包含参数名与原因）。
+    也不例外。
+    缺值、空字符串、负数、小数、正号、下划线、非十进制数字字符或
+    超出范围时同样由 argparse 拒绝（退出码 2，提示中包含参数名与原因）。
     """
     text = str(value)
     if not text:
@@ -126,15 +122,20 @@ def after_id(value):
             f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
             f"收到: {value!r}"
         )
-    if not INTEGER_RE.match(text):
+    # 逐字符按 Unicode 十进制数值转写，等价于 int() 能接受的数字集合，
+    # 但显式拒绝 int() 同样容忍的空白与下划线，确保“纯十进制数字文本”；
+    # 全角 ０、阿拉伯印度 ٠ 等非 ASCII 零字符转写后与 ASCII 0 等价。
+    digits = decimal_digits(text)
+    if digits is None:
         raise argparse.ArgumentTypeError(
             f"--after-id 必须是十进制非负整数，收到: {value!r}"
         )
     # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
     # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
-    # 前导零不改变数值，先去掉再判断，因此 5000 个 0 后接 1 与普通参数 1
-    # 完全等价，5000 个 0 本身等价于 0，参数文本长度不受限制。
-    digits = text.lstrip("0")
+    # 前导零（任何文字的十进制零字符）不改变数值，先去掉再判断，因此
+    # 5000 个 0/０/٠ 后接 1 与普通参数 1 完全等价，5000 个零字符本身
+    # 等价于 0，参数文本长度不受限制。
+    digits = digits.lstrip("0")
     if not digits:
         # 整段都是前导零：数值为零，是合法下界（0 表示从最早流水开始）。
         return 0
