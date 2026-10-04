@@ -185,12 +185,16 @@ class InventoryDB:
             for row in cur.fetchall()
         ]
 
-    def list_movements(self, sku, mtype=None, after_id=None, limit=None):
-        """返回该商品按 id 升序的流水；可按类型、编号下界筛选并限定条数。
+    def list_movements(self, sku, mtype=None, after_id=None, limit=None,
+                       before_id=None):
+        """返回该商品按 id 升序的流水；可按类型、编号上下界筛选并限定条数。
 
         - mtype 非空时只返回对应类型；
         - after_id 非空时只返回 id 严格大于该值的流水，下界无需真实存在，
           也无需属于当前 SKU；
+        - before_id 非空时只返回 id 严格小于该值的流水（0 为合法上界，
+          此时没有任何编号小于 0 的流水，结果为空），上界无需真实存在，
+          也无需属于当前 SKU；下界大于或等于上界时各条件取交集，结果为空；
         - limit 非空时在上述筛选与 id 升序排序之后只取前 limit 条，
           其他商品的流水不占名额。
         筛选只影响返回的行，保留原始 id 与 balance，不重新编号或重算余额。
@@ -199,6 +203,14 @@ class InventoryDB:
         # 直接调用本层时也不会把非法值交给 SQL 的 LIMIT。
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             raise ValueError(f"limit 必须是正整数，收到: {limit!r}")
+        # 防御性校验：正常入口已由 CLI 的 before_id 保证，此处确保直接
+        # 调用本层时也不会把非法值交给 SQL 绑定（0 是合法上界）。
+        if before_id is not None and (
+            not isinstance(before_id, int) or not 0 <= before_id <= MAX_QTY
+        ):
+            raise ValueError(
+                f"上界必须是 0 至 {MAX_QTY} 的整数，收到: {before_id!r}"
+            )
         sql = (
             "SELECT id, type, quantity, balance FROM movements "
             "WHERE sku = ?"
@@ -207,6 +219,9 @@ class InventoryDB:
         if after_id is not None:
             sql += " AND id > ?"
             params.append(after_id)
+        if before_id is not None:
+            sql += " AND id < ?"
+            params.append(before_id)
         if mtype is not None:
             sql += " AND type = ?"
             params.append(mtype)
