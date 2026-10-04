@@ -158,6 +158,33 @@ class InventoryDB:
             },
         }
 
+    def list_low_stock(self, threshold):
+        """返回当前数量小于或等于 threshold 的全部商品。
+
+        结果只含 sku、name、quantity（精确整数），不带流水，并按 SKU 的
+        Unicode 字符顺序（SQLite TEXT 的二进制排序）升序排列、区分大小写，
+        与登记顺序无关。没有流水的已登记商品同样参与判断；阈值为零时
+        只匹配零库存商品。只读查询，不改变商品与流水，也不保存阈值。
+        """
+        # 防御性校验：正常入口已由 CLI 的 threshold 保证，此处确保直接
+        # 调用本层时也不会把非法值交给 SQL 绑定。
+        if not isinstance(threshold, int) or not 0 <= threshold <= MAX_QTY:
+            raise ValueError(
+                f"阈值必须是 0 至 {MAX_QTY} 的整数，收到: {threshold!r}"
+            )
+        try:
+            cur = self.conn.execute(
+                "SELECT sku, name, quantity FROM products "
+                "WHERE quantity <= ? ORDER BY sku ASC",
+                (threshold,),
+            )
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"读取数据库失败: {exc}") from exc
+        return [
+            {"sku": row[0], "name": row[1], "quantity": row[2]}
+            for row in cur.fetchall()
+        ]
+
     def list_movements(self, sku, mtype=None, after_id=None, limit=None):
         """返回该商品按 id 升序的流水；可按类型、编号下界筛选并限定条数。
 

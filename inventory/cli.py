@@ -1,4 +1,4 @@
-"""命令行入口：add / receive / issue / show 四个子命令。
+"""命令行入口：add / receive / issue / show / low-stock 五个子命令。
 
 约定：
 - 参数与业务规则错误 -> 退出码 2，原因写入 stderr，stdout 为空；
@@ -154,6 +154,52 @@ def after_id(value):
     return number
 
 
+def threshold(value):
+    """low-stock --threshold：0 至 2^63-1 的十进制非负整数，允许前导零。
+
+    数字文本沿用 --after-id 的语义：十进制数字以 Unicode 十进制数字字符
+    为准（ASCII 0-9、全角数字 U+FF10 等、阿拉伯印度数字 U+0660 等及其他
+    文字的十进制数字字符，允许不同文字混写）；前导零（任何文字的零字符）
+    不改变数值，0 是合法下界，只匹配当前数量为零的商品。
+    完整参数值参与校验，不做任何去空白：含空格、制表符、回车、换行
+    （无论在开头、结尾还是中间）一律以参数错误拒绝。
+    缺值、空字符串、负数、小数、正负号、下划线、非十进制数字字符或
+    超出范围时同样由 argparse 拒绝（退出码 2，提示中包含 --threshold
+    与拒绝原因，不出现异常堆栈），且发生在打开数据库之前。
+    """
+    text = str(value)
+    if not text:
+        raise argparse.ArgumentTypeError("--threshold 不能为空")
+    if any(ch.isspace() for ch in text):
+        raise argparse.ArgumentTypeError(
+            f"--threshold 必须是完整的十进制非负整数，不能含空白"
+            f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
+            f"收到: {value!r}"
+        )
+    digits = decimal_digits(text)
+    if digits is None:
+        raise argparse.ArgumentTypeError(
+            f"--threshold 必须是十进制非负整数，收到: {value!r}"
+        )
+    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
+    # 个数字的整数字符串转换抛出 ValueError。前导零不改变数值，先去掉再
+    # 判断，参数文本长度不受限制。
+    digits = digits.lstrip("0")
+    if not digits:
+        # 整段都是零字符：数值为零，是合法阈值，只匹配零库存商品。
+        return 0
+    if len(digits) > len(str(MAX_AFTER_ID)):
+        raise argparse.ArgumentTypeError(
+            f"--threshold 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    number = int(digits)
+    if number > MAX_AFTER_ID:
+        raise argparse.ArgumentTypeError(
+            f"--threshold 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    return number
+
+
 def limit_count(value):
     """--limit：1 至 1000 的十进制正整数，只允许 ASCII 数字 0 至 9，允许前导零。
 
@@ -244,6 +290,23 @@ def build_parser():
             "缺省返回全部匹配流水"
         ),
     )
+
+    p_low = sub.add_parser(
+        "low-stock", help="按统一阈值查询当前数量不超过阈值的全部商品"
+    )
+    p_low.add_argument(
+        "--threshold",
+        required=True,
+        type=threshold,
+        metavar="N",
+        help=(
+            "低库存阈值：返回当前数量小于或等于该值的全部商品（0 只匹配"
+            "零库存）；接受 0 至 9223372036854775807 的十进制非负整数，"
+            "允许前导零，数字字符按 Unicode 十进制语义识别并可混写；"
+            "完整参数值不能含空格、制表符、回车或换行"
+            "（无论在开头、中间还是结尾）"
+        ),
+    )
     return parser
 
 
@@ -271,6 +334,12 @@ def run(argv):
                 print(f"错误: {exc}", file=sys.stderr)
                 return 2
             emit(product)
+            return 0
+
+        if args.command == "low-stock":
+            # 阈值已在打开数据库前由 argparse 校验；查询为只读，不写入任何设置。
+            products = db.list_low_stock(args.threshold)
+            emit({"products": products})
             return 0
 
         # receive / issue / show 都需要先校验 SKU 并查找商品。
