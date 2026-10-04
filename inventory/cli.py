@@ -44,7 +44,8 @@ def decimal_digits(text):
 # 不允许开头、结尾或中间出现任何空白（$ 会容忍末尾一个换行，故不能用）。
 LIMIT_DIGITS_RE = re.compile(r"\A[0-9]+\Z")
 
-# SQLite INTEGER 主键的最大值（64 位有符号整数上界）。
+# --after-id 与 --threshold 共用的数值上界：SQLite INTEGER 主键的最大值
+# （64 位有符号整数上界）。
 MAX_AFTER_ID = 9223372036854775807
 
 # show --limit 单次最多返回的流水条数。
@@ -99,6 +100,63 @@ def positive_int(value):
     return number
 
 
+def _nonnegative_int(value, param_name):
+    """--after-id 与 --threshold 的共同规则，只在此处维护一处。
+
+    接受 0 至 MAX_AFTER_ID（2^63-1）的完整十进制数字文本，允许前导零。
+    十进制数字以 Unicode 十进制数字字符为准：ASCII 0-9、全角数字
+    （U+FF10 等）、阿拉伯印度数字（U+0660 等）及其他文字的十进制
+    数字字符都按同一数值处理，允许不同文字的数字混写。
+    完整参数值参与校验，不做任何去空白：含空格、制表符、回车、换行
+    （无论在开头、结尾还是中间）一律以参数错误拒绝，数字后附单个换行
+    也不例外。
+    缺值、空字符串、负数、小数、正负号、下划线、非十进制数字字符或
+    超出范围时抛出 ArgumentTypeError，提示包含 param_name（形如
+    "--after-id" 或 "--threshold"）与拒绝原因。
+    """
+    text = str(value)
+    if not text:
+        raise argparse.ArgumentTypeError(f"{param_name} 不能为空")
+    # 显式检查整段文本中的空白，给出含“不能含空白”的拒绝原因；
+    # 不先 strip：空白位于开头、中间或结尾都以同一原因拒绝。
+    if any(ch.isspace() for ch in text):
+        raise argparse.ArgumentTypeError(
+            f"{param_name} 必须是完整的十进制非负整数，不能含空白"
+            f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
+            f"收到: {value!r}"
+        )
+    # 逐字符按 Unicode 十进制数值转写，等价于 int() 能接受的数字集合，
+    # 但显式拒绝 int() 同样容忍的空白与下划线，确保“纯十进制数字文本”；
+    # 全角 ０、阿拉伯印度 ٠ 等非 ASCII 零字符转写后与 ASCII 0 等价。
+    digits = decimal_digits(text)
+    if digits is None:
+        raise argparse.ArgumentTypeError(
+            f"{param_name} 必须是十进制非负整数，收到: {value!r}"
+        )
+    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
+    # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
+    # 前导零（任何文字的十进制零字符）不改变数值，先去掉再判断，因此
+    # 5000 个 0/０/٠ 后接 1 与普通参数 1 完全等价，5000 个零字符本身
+    # 等价于 0，参数文本长度不受限制。
+    digits = digits.lstrip("0")
+    if not digits:
+        # 整段都是前导零：数值为零，是合法下界/阈值。
+        return 0
+    # 有效数字比上限的位数还多，数值必然超过上限（20 位十进制数至少为
+    # 10^19），无需转换即可拒绝。
+    if len(digits) > len(str(MAX_AFTER_ID)):
+        raise argparse.ArgumentTypeError(
+            f"{param_name} 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    # 位数不超过上限位数（19 位），转换不受默认位数限制影响，再精确比较。
+    number = int(digits)
+    if number > MAX_AFTER_ID:
+        raise argparse.ArgumentTypeError(
+            f"{param_name} 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    return number
+
+
 def after_id(value):
     """--after-id：0 至 2^63-1 的十进制非负整数，允许前导零。
 
@@ -110,94 +168,28 @@ def after_id(value):
     也不例外。
     缺值、空字符串、负数、小数、正号、下划线、非十进制数字字符或
     超出范围时同样由 argparse 拒绝（退出码 2，提示中包含参数名与原因）。
+
+    校验规则与 low-stock 的 --threshold 共用 _nonnegative_int，
+    仅拒绝原因中的参数名不同。
     """
-    text = str(value)
-    if not text:
-        raise argparse.ArgumentTypeError("--after-id 不能为空")
-    # 显式检查整段文本中的空白，给出含“不能含空白”的拒绝原因；
-    # 不先 strip：空白位于开头、中间或结尾都以同一原因拒绝。
-    if any(ch.isspace() for ch in text):
-        raise argparse.ArgumentTypeError(
-            f"--after-id 必须是完整的十进制非负整数，不能含空白"
-            f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
-            f"收到: {value!r}"
-        )
-    # 逐字符按 Unicode 十进制数值转写，等价于 int() 能接受的数字集合，
-    # 但显式拒绝 int() 同样容忍的空白与下划线，确保“纯十进制数字文本”；
-    # 全角 ０、阿拉伯印度 ٠ 等非 ASCII 零字符转写后与 ASCII 0 等价。
-    digits = decimal_digits(text)
-    if digits is None:
-        raise argparse.ArgumentTypeError(
-            f"--after-id 必须是十进制非负整数，收到: {value!r}"
-        )
-    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
-    # 个数字的整数字符串转换抛出 ValueError（且不要求用户调整解释器设置）。
-    # 前导零（任何文字的十进制零字符）不改变数值，先去掉再判断，因此
-    # 5000 个 0/０/٠ 后接 1 与普通参数 1 完全等价，5000 个零字符本身
-    # 等价于 0，参数文本长度不受限制。
-    digits = digits.lstrip("0")
-    if not digits:
-        # 整段都是前导零：数值为零，是合法下界（0 表示从最早流水开始）。
-        return 0
-    # 有效数字比上限的位数还多，数值必然超过上限（20 位十进制数至少为
-    # 10^19），无需转换即可拒绝。
-    if len(digits) > len(str(MAX_AFTER_ID)):
-        raise argparse.ArgumentTypeError(
-            f"--after-id 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
-        )
-    # 位数不超过上限位数（19 位），转换不受默认位数限制影响，再精确比较。
-    number = int(digits)
-    if number > MAX_AFTER_ID:
-        raise argparse.ArgumentTypeError(
-            f"--after-id 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
-        )
-    return number
+    return _nonnegative_int(value, "--after-id")
 
 
 def threshold(value):
     """low-stock --threshold：0 至 2^63-1 的十进制非负整数，允许前导零。
 
-    数字文本沿用 --after-id 的语义：十进制数字以 Unicode 十进制数字字符
-    为准（ASCII 0-9、全角数字 U+FF10 等、阿拉伯印度数字 U+0660 等及其他
-    文字的十进制数字字符，允许不同文字混写）；前导零（任何文字的零字符）
-    不改变数值，0 是合法下界，只匹配当前数量为零的商品。
+    数字文本与 --after-id 同值同义（共用 _nonnegative_int）：十进制数字
+    以 Unicode 十进制数字字符为准（ASCII 0-9、全角数字 U+FF10 等、
+    阿拉伯印度数字 U+0660 等及其他文字的十进制数字字符，允许不同文字
+    混写）；前导零（任何文字的零字符）不改变数值，0 是合法阈值，
+    只匹配当前数量为零的商品。
     完整参数值参与校验，不做任何去空白：含空格、制表符、回车、换行
     （无论在开头、结尾还是中间）一律以参数错误拒绝。
     缺值、空字符串、负数、小数、正负号、下划线、非十进制数字字符或
     超出范围时同样由 argparse 拒绝（退出码 2，提示中包含 --threshold
     与拒绝原因，不出现异常堆栈），且发生在打开数据库之前。
     """
-    text = str(value)
-    if not text:
-        raise argparse.ArgumentTypeError("--threshold 不能为空")
-    if any(ch.isspace() for ch in text):
-        raise argparse.ArgumentTypeError(
-            f"--threshold 必须是完整的十进制非负整数，不能含空白"
-            f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
-            f"收到: {value!r}"
-        )
-    digits = decimal_digits(text)
-    if digits is None:
-        raise argparse.ArgumentTypeError(
-            f"--threshold 必须是十进制非负整数，收到: {value!r}"
-        )
-    # 只比较数值而不把整段文本交给 int()：Python 3.11 起默认对超过 4300
-    # 个数字的整数字符串转换抛出 ValueError。前导零不改变数值，先去掉再
-    # 判断，参数文本长度不受限制。
-    digits = digits.lstrip("0")
-    if not digits:
-        # 整段都是零字符：数值为零，是合法阈值，只匹配零库存商品。
-        return 0
-    if len(digits) > len(str(MAX_AFTER_ID)):
-        raise argparse.ArgumentTypeError(
-            f"--threshold 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
-        )
-    number = int(digits)
-    if number > MAX_AFTER_ID:
-        raise argparse.ArgumentTypeError(
-            f"--threshold 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
-        )
-    return number
+    return _nonnegative_int(value, "--threshold")
 
 
 def limit_count(value):
