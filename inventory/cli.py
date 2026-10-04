@@ -154,6 +154,48 @@ def after_id(value):
     return number
 
 
+def threshold(value):
+    """--threshold：0 至 2^63-1 的十进制非负整数，允许前导零。
+
+    数字文本语义与 --after-id 完全一致：以 Unicode 十进制数字字符为准，
+    允许不同文字的数字混写，前导零不改变数值；完整参数值参与校验，
+    含空白、正负号、小数点或其他非数字字符一律拒绝。零是合法下界，
+    只匹配零库存商品。缺值、空字符串或数值越界时由 argparse 拒绝
+    （退出码 2，提示中包含 --threshold 与拒绝原因），且发生在打开
+    数据库之前。
+    """
+    text = str(value)
+    if not text:
+        raise argparse.ArgumentTypeError("--threshold 不能为空")
+    if any(ch.isspace() for ch in text):
+        raise argparse.ArgumentTypeError(
+            f"--threshold 必须是完整的十进制非负整数，不能含空白"
+            f"（空格、制表符、回车或换行，无论位于开头、中间还是结尾），"
+            f"收到: {value!r}"
+        )
+    digits = decimal_digits(text)
+    if digits is None:
+        raise argparse.ArgumentTypeError(
+            f"--threshold 必须是十进制非负整数，收到: {value!r}"
+        )
+    # 与 after_id 相同：只比较数值，去掉前导零后按位数预判，避免触发
+    # Python 3.11 起对超长整数字符串转换的默认位数限制。
+    digits = digits.lstrip("0")
+    if not digits:
+        # 整段都是零字符：数值为零，是合法下界（只匹配零库存）。
+        return 0
+    if len(digits) > len(str(MAX_AFTER_ID)):
+        raise argparse.ArgumentTypeError(
+            f"--threshold 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    number = int(digits)
+    if number > MAX_AFTER_ID:
+        raise argparse.ArgumentTypeError(
+            f"--threshold 不能超过 {MAX_AFTER_ID}，收到: {value!r}"
+        )
+    return number
+
+
 def limit_count(value):
     """--limit：1 至 1000 的十进制正整数，只允许 ASCII 数字 0 至 9，允许前导零。
 
@@ -244,6 +286,20 @@ def build_parser():
             "缺省返回全部匹配流水"
         ),
     )
+    p_low = sub.add_parser(
+        "low-stock", help="按统一阈值列出当前数量不超过阈值的全部商品"
+    )
+    p_low.add_argument(
+        "--threshold",
+        required=True,
+        type=threshold,
+        metavar="N",
+        help=(
+            "低库存阈值：返回当前数量小于或等于该值的全部商品；"
+            "接受 0 至 9223372036854775807 的十进制整数，允许前导零；"
+            "完整参数值不能含空格、制表符、回车或换行（无论在开头、中间还是结尾）"
+        ),
+    )
     return parser
 
 
@@ -271,6 +327,11 @@ def run(argv):
                 print(f"错误: {exc}", file=sys.stderr)
                 return 2
             emit(product)
+            return 0
+
+        if args.command == "low-stock":
+            # 只读查询：不校验 SKU，不写任何数据；阈值已在解析阶段校验。
+            emit({"products": db.list_low_stock(args.threshold)})
             return 0
 
         # receive / issue / show 都需要先校验 SKU 并查找商品。
