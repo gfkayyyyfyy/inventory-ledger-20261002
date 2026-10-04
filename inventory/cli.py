@@ -100,9 +100,10 @@ def positive_int(value):
 
 
 def _parse_nonnegative_decimal(value, option):
-    """--after-id 与 --threshold 的共同规则：0 至 MAX_AFTER_ID 的纯十进制
-    数字文本，允许前导零，返回对应整数；失败抛 argparse.ArgumentTypeError，
-    提示中包含调用方参数名 option（如 "--after-id"）。
+    """--after-id、--before-id 与 --threshold 的共同规则：0 至 MAX_AFTER_ID
+    的纯十进制数字文本，允许前导零，返回对应整数；失败抛
+    argparse.ArgumentTypeError，提示中包含调用方参数名 option
+    （如 "--after-id"、"--before-id"）。
 
     十进制数字以 Unicode 十进制数字字符为准：ASCII 0-9、全角数字
     （U+FF10 等）、阿拉伯印度数字（U+0660 等）及其他文字的十进制
@@ -171,6 +172,25 @@ def after_id(value):
     校验规则与 threshold 共用 _parse_nonnegative_decimal，二者只差参数名。
     """
     return _parse_nonnegative_decimal(value, "--after-id")
+
+
+def before_id(value):
+    """--before-id：0 至 2^63-1 的十进制非负整数，允许前导零。
+
+    数字文本语义与 --after-id 完全一致：十进制数字以 Unicode 十进制数字
+    字符为准（ASCII 0-9、全角数字 U+FF10 等、阿拉伯印度数字 U+0660 等
+    及其他文字的十进制数字字符，允许不同文字混写）；前导零（任何文字的
+    零字符）不改变数值，数千位前导零仍按实际数值判断。
+    完整参数值参与校验，不做任何去空白：含空格、制表符、回车、换行
+    （无论在开头、结尾还是中间）一律以参数错误拒绝。
+    缺值、空字符串、负数、小数、正负号、下划线、非十进制数字字符或
+    超出范围时同样由 argparse 拒绝（退出码 2，提示中包含 --before-id
+    与拒绝原因，不出现异常堆栈），且发生在打开数据库之前。
+
+    校验规则与 after_id、threshold 共用 _parse_nonnegative_decimal，
+    三者只差参数名。
+    """
+    return _parse_nonnegative_decimal(value, "--before-id")
 
 
 def threshold(value):
@@ -271,12 +291,25 @@ def build_parser():
         ),
     )
     p_show.add_argument(
+        "--before-id",
+        type=before_id,
+        default=None,
+        metavar="ID",
+        help=(
+            "只返回该 SKU 中编号严格小于 ID 的流水（传入 0 时成功返回空流水）；"
+            "接受 0 至 9223372036854775807 的十进制整数，允许前导零与 Unicode "
+            "十进制数字混写；上界无需对应实际流水，也无需属于当前 SKU；"
+            "与 --after-id、--type 同用时取交集；"
+            "完整参数值不能含空格、制表符、回车或换行（无论在开头、中间还是结尾）"
+        ),
+    )
+    p_show.add_argument(
         "--limit",
         type=limit_count,
         default=None,
         metavar="N",
         help=(
-            "在 --sku/--type/--after-id 筛选后，按原始 id 升序只返回前 N 条流水；"
+            "在 --sku/--type/--after-id/--before-id 筛选后，按原始 id 升序只返回前 N 条流水；"
             "接受 1 至 1000、仅由 ASCII 数字 0 至 9 组成的非空文本，允许前导零；"
             "缺省返回全部匹配流水"
         ),
@@ -346,7 +379,7 @@ def run(argv):
                 print(f"错误: 商品不存在: {sku}", file=sys.stderr)
                 return 2
             product["movements"] = db.list_movements(
-                sku, args.type, args.after_id, args.limit
+                sku, args.type, args.after_id, args.before_id, args.limit
             )
             emit(product)
             return 0

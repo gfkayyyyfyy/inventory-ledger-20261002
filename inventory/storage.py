@@ -185,12 +185,18 @@ class InventoryDB:
             for row in cur.fetchall()
         ]
 
-    def list_movements(self, sku, mtype=None, after_id=None, limit=None):
-        """返回该商品按 id 升序的流水；可按类型、编号下界筛选并限定条数。
+    def list_movements(
+        self, sku, mtype=None, after_id=None, before_id=None, limit=None
+    ):
+        """返回该商品按 id 升序的流水；可按类型、编号下界/上界筛选并限定条数。
 
         - mtype 非空时只返回对应类型；
         - after_id 非空时只返回 id 严格大于该值的流水，下界无需真实存在，
           也无需属于当前 SKU；
+        - before_id 非空时只返回 id 严格小于该值的流水，上界无需真实存在，
+          也无需属于当前 SKU；传入 0 时没有任何 id 为负的行，结果为空；
+        - 下界与上界同时给出时取交集（after_id < id < before_id），
+          下界大于或等于上界时结果为空；
         - limit 非空时在上述筛选与 id 升序排序之后只取前 limit 条，
           其他商品的流水不占名额。
         筛选只影响返回的行，保留原始 id 与 balance，不重新编号或重算余额。
@@ -207,6 +213,10 @@ class InventoryDB:
         if after_id is not None:
             sql += " AND id > ?"
             params.append(after_id)
+        if before_id is not None:
+            # 严格小于：id 等于上界的行被排除；上界为 0 时没有任何行满足。
+            sql += " AND id < ?"
+            params.append(before_id)
         if mtype is not None:
             sql += " AND type = ?"
             params.append(mtype)
