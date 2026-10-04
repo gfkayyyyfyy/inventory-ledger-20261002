@@ -3,10 +3,13 @@
 约定：
 - 参数与业务规则错误 -> 退出码 2，原因写入 stderr，stdout 为空；
 - 数据库无法打开或读写 -> 退出码 1；
-- 成功 -> 退出码 0，stdout 输出单个 JSON 对象。
+- 成功 -> 退出码 0，stdout 输出单个 JSON 对象
+  （low-stock 指定 --format csv 时输出 CSV 文本）。
 """
 
 import argparse
+import csv
+import io
 import json
 import re
 import sys
@@ -261,6 +264,27 @@ def emit(payload):
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def emit_csv(products):
+    """把 low-stock 的商品清单以 CSV 写到标准输出。
+
+    输出为无 BOM 的 UTF-8，每条记录以 LF 结束；首行固定为
+    sku,name,quantity，其后每个商品一条记录，顺序与 JSON 输出一致
+    （SKU 的区分大小写字符升序）。SKU 与名称保留查询返回的原始文本；
+    字段含逗号、双引号、回车或换行时用双引号包裹，并把内部双引号写成
+    两个双引号（csv 模块的 QUOTE_MINIMAL 语义），字段内部的回车与换行
+    保持原样。数量写为不带分组符或指数的 ASCII 十进制整数。没有匹配
+    商品时只输出表头。
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["sku", "name", "quantity"])
+    for product in products:
+        writer.writerow([product["sku"], product["name"], product["quantity"]])
+    # 显式按 UTF-8 编码写入二进制缓冲，不依赖标准输出的环境编码，
+    # 也不会引入 BOM 或把 LF 翻译成其他行尾。
+    sys.stdout.buffer.write(buffer.getvalue().encode("utf-8"))
+
+
 def build_parser():
     parser = ArgumentParser(prog="inventory", description="本地库存台账")
     parser.add_argument("--db", required=True, help="SQLite 数据库文件路径")
@@ -336,6 +360,17 @@ def build_parser():
             "（无论在开头、中间还是结尾）"
         ),
     )
+    p_low.add_argument(
+        "--format",
+        choices=("json", "csv"),
+        default="json",
+        help=(
+            "输出格式：json（缺省，单个 JSON 对象）或 csv（无 BOM 的 UTF-8、"
+            "LF 行尾的表格文本，首行 sku,name,quantity）；取值区分大小写，"
+            "缺值、空字符串、其他取值、大小写变体或带两端空白的取值均以"
+            "退出码 2 拒绝，且校验发生在打开数据库之前"
+        ),
+    )
     return parser
 
 
@@ -366,9 +401,13 @@ def run(argv):
             return 0
 
         if args.command == "low-stock":
-            # 阈值已在打开数据库前由 argparse 校验；查询为只读，不写入任何设置。
+            # 阈值与 --format 已在打开数据库前由 argparse 校验；
+            # 查询为只读，不写入任何设置。
             products = db.list_low_stock(args.threshold)
-            emit({"products": products})
+            if args.format == "csv":
+                emit_csv(products)
+            else:
+                emit({"products": products})
             return 0
 
         # receive / issue / show 都需要先校验 SKU 并查找商品。
