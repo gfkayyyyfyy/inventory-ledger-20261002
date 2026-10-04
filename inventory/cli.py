@@ -3,10 +3,13 @@
 约定：
 - 参数与业务规则错误 -> 退出码 2，原因写入 stderr，stdout 为空；
 - 数据库无法打开或读写 -> 退出码 1；
-- 成功 -> 退出码 0，stdout 输出单个 JSON 对象。
+- 成功 -> 退出码 0；stdout 默认输出单个 JSON 对象，
+  low-stock 指定 --format csv 时改输出 CSV（仅该查询支持）。
 """
 
 import argparse
+import csv
+import io
 import json
 import re
 import sys
@@ -214,6 +217,23 @@ def threshold(value):
     return _parse_nonnegative_decimal(value, "--threshold")
 
 
+def output_format(value):
+    """low-stock --format：只接受大小写敏感的 "json" 或 "csv"。
+
+    完整参数值按原样逐字符比较，不做去空白或大小写折叠：空字符串、
+    "JSON"/"Json" 等大小写变体、" csv"/"csv " 等带两端空白的取值、
+    其他任意取值都不是合法格式。非法时由 argparse 以退出码 2 拒绝
+    （提示中包含 --format 与收到的取值、不出现异常堆栈），且与
+    --threshold 一样发生在打开数据库之前，不创建台账文件、不改变数据。
+    """
+    if value not in ("json", "csv"):
+        raise argparse.ArgumentTypeError(
+            f"--format 只支持 json 或 csv（大小写敏感、不能含空白），"
+            f"收到: {value!r}"
+        )
+    return value
+
+
 def limit_count(value):
     """--limit：1 至 1000 的十进制正整数，只允许 ASCII 数字 0 至 9，允许前导零。
 
@@ -259,6 +279,30 @@ def clean_text(value, field):
 
 def emit(payload):
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def emit_low_stock_csv(products):
+    """把低库存清单以 CSV 写入标准输出。
+
+    与同阈值的 JSON 结果使用同一商品集合（同一查询、同一区分大小写的
+    SKU 升序），只改变呈现格式：
+    - 无 BOM 的 UTF-8：不自行写入 BOM，交由 stdout 按其 UTF-8 编码输出；
+    - 每条记录以 LF 结束（lineterminator="\\n"），不会在行尾写成 CRLF；
+    - 首行固定 sku,name,quantity；无匹配商品时只输出该表头；
+    - SKU 与名称保留查询返回的原始文本：字段含逗号、双引号、回车或
+      换行时按 RFC 4180 用双引号包裹，内部双引号写成两个双引号，
+      字段内部的回车与换行原样保留（csv 默认 quoting 恰好以这四个字符
+      为加引号条件，不做其他转义或空白修剪）；
+    - 数量为精确整数，直接 str() 输出 ASCII 十进制文本，不带分组符或指数。
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(("sku", "name", "quantity"))
+    for product in products:
+        writer.writerow(
+            (product["sku"], product["name"], str(product["quantity"]))
+        )
+    sys.stdout.write(buffer.getvalue())
 
 
 def build_parser():
@@ -336,6 +380,19 @@ def build_parser():
             "（无论在开头、中间还是结尾）"
         ),
     )
+    p_low.add_argument(
+        "--format",
+        default="json",
+        type=output_format,
+        choices=("json", "csv"),
+        help=(
+            "输出格式：json（缺省）返回原有的单个 JSON 对象；"
+            "csv 向标准输出写入表头 sku,name,quantity 与逐商品记录"
+            "（UTF-8 无 BOM、LF 结束，无匹配时只输出表头）。"
+            "取值大小写敏感，只接受 json 或 csv，空字符串、其他取值、"
+            "大小写变体或带两端空白均以退出码 2 拒绝，且发生在打开数据库前"
+        ),
+    )
     return parser
 
 
@@ -366,9 +423,13 @@ def run(argv):
             return 0
 
         if args.command == "low-stock":
-            # 阈值已在打开数据库前由 argparse 校验；查询为只读，不写入任何设置。
+            # 阈值与格式都已在打开数据库前由 argparse 校验；查询为只读，
+            # 不写入任何设置，也不保存本次使用的格式或阈值。
             products = db.list_low_stock(args.threshold)
-            emit({"products": products})
+            if args.format == "csv":
+                emit_low_stock_csv(products)
+            else:
+                emit({"products": products})
             return 0
 
         # receive / issue / show 都需要先校验 SKU 并查找商品。
